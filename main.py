@@ -15,12 +15,14 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import Image, Node, Nodes, Plain
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.star_tools import StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .core.config_manager import (
+    IMAGE_AUDIT_FAILURE_ACTION_FORWARD,
     LLM_TOOL_IMAGE_GENERATION,
     LLM_TOOL_PRESET_EDIT,
     LLM_TOOL_PRESET_QUERY,
@@ -266,6 +268,7 @@ class ImageGenerationPlugin(Star):
         personas: list[str] | None = None,
         source_event: AstrMessageEvent | None = None,
         auto_send: bool = True,
+        platform_name: str = "",
     ) -> GenerationTaskRecord:
         """Create and track an image generation task in the unified task manager."""
         if preset is None:
@@ -286,6 +289,7 @@ class ImageGenerationPlugin(Star):
                 is_usage_limit_admin=is_usage_limit_admin,
                 deliver_via_ai=source == "LLM工具",
                 auto_send=auto_send,
+                platform_name=platform_name,
             ),
             task_id=task_id,
             source=source,
@@ -648,6 +652,7 @@ class ImageGenerationPlugin(Star):
         is_usage_limit_admin: bool = False,
         deliver_via_ai: bool = False,
         auto_send: bool = True,
+        platform_name: str = "",
     ) -> None:
         """异步生成图片并发送。"""
         if not self.generator or not self.generator.adapter:
@@ -727,6 +732,7 @@ class ImageGenerationPlugin(Star):
             is_usage_limit_admin,
             deliver_via_ai,
             auto_send,
+            platform_name,
         )
 
     async def _do_generate_and_send(
@@ -741,6 +747,7 @@ class ImageGenerationPlugin(Star):
         is_usage_limit_admin: bool,
         deliver_via_ai: bool = False,
         auto_send: bool = True,
+        platform_name: str = "",
     ) -> None:
         """执行生成逻辑并发送结果。"""
         start_time = time.time()
@@ -800,15 +807,37 @@ class ImageGenerationPlugin(Star):
                     is_admin=is_usage_limit_admin,
                     count=len(generated_file_paths),
                 )
-            self.task_manager.mark_generation_task_failed(
-                task_id,
-                f"图片内容审核未通过: {image_reason}",
-            )
+            failure_detail = f"图片内容审核未通过: {image_reason}"
             if deliver_via_ai or not auto_send or not unified_msg_origin:
+                self.task_manager.mark_generation_task_failed(task_id, failure_detail)
                 return
+            if (
+                self.config_manager.safety_audit_settings.image_audit.failure_result_action
+                == IMAGE_AUDIT_FAILURE_ACTION_FORWARD
+            ):
+                sent = await self._send_generated_images(
+                    unified_msg_origin,
+                    generated_file_paths,
+                    info_message=failure_detail,
+                    platform_name=platform_name,
+                    force_forward=True,
+                    allow_plain_fallback=False,
+                )
+                if sent:
+                    self.task_manager.mark_generation_task_succeeded(
+                        task_id,
+                        result_count=len(generated_file_paths),
+                        result_paths=generated_file_paths,
+                        message="图片审核未通过，已按配置使用合并转发发送",
+                    )
+                    return
+                logger.warning(
+                    f"{task_log} 图片审核未通过结果合并转发失败，已按策略不回退普通图片消息"
+                )
+            self.task_manager.mark_generation_task_failed(task_id, failure_detail)
             await self.context.send_message(
                 unified_msg_origin,
-                MessageChain().message(f"❌ 图片内容审核未通过: {image_reason}"),
+                MessageChain().message(f"❌ {failure_detail}"),
             )
             return
 
@@ -834,6 +863,31 @@ class ImageGenerationPlugin(Star):
         if deliver_via_ai or not auto_send or not unified_msg_origin:
             return
 
+        info_message = self._build_result_info_message(
+            duration=duration,
+            generated_count=len(generated_file_paths),
+            task_id=task_id,
+            unified_msg_origin=unified_msg_origin,
+            is_usage_limit_admin=is_usage_limit_admin,
+        )
+
+        await self._send_generated_images(
+            unified_msg_origin,
+            generated_file_paths,
+            info_message=info_message,
+            platform_name=platform_name,
+        )
+
+    def _build_result_info_message(
+        self,
+        *,
+        duration: float,
+        generated_count: int,
+        task_id: str,
+        unified_msg_origin: str,
+        is_usage_limit_admin: bool,
+    ) -> str:
+        """Build the optional text appended to generated image results."""
         info_parts = []
         if self.config_manager.should_show_result_info(RESULT_INFO_DURATION):
             info_parts.append(f"📊 耗时: {duration:.2f}s")
@@ -847,7 +901,7 @@ class ImageGenerationPlugin(Star):
             )
 
         if self.config_manager.should_show_result_info(RESULT_INFO_COUNT):
-            info_parts.append(f"🖼️ 数量: {len(generated_file_paths)}张")
+            info_parts.append(f"🖼️ 数量: {generated_count}张")
 
         if self.config_manager.should_show_result_info(RESULT_INFO_TASK_ID):
             info_parts.append(f"🧾 任务ID: {task_id}")
@@ -867,16 +921,7 @@ class ImageGenerationPlugin(Star):
             )
             info_parts.append(f"📅 今日用量: {count}/{daily_limit}")
 
-        if info_parts:
-            info_message = "\n".join(info_parts)
-        else:
-            info_message = ""
-
-        await self._send_generated_images(
-            unified_msg_origin,
-            generated_file_paths,
-            info_message=info_message,
-        )
+        return "\n".join(info_parts) if info_parts else ""
 
     async def _send_generated_images(
         self,
@@ -884,8 +929,60 @@ class ImageGenerationPlugin(Star):
         image_paths: list[str],
         *,
         info_message: str = "",
+        platform_name: str = "",
+        force_forward: bool = False,
+        allow_plain_fallback: bool = True,
+    ) -> bool:
+        """按配置发送生成图片。"""
+        use_forward = (
+            force_forward or self.config_manager.send_result_as_forward
+        ) and platform_name == "aiocqhttp"
+        if not use_forward:
+            if force_forward and not allow_plain_fallback:
+                logger.warning(
+                    f"{LOG} 合并转发消息仅支持 aiocqhttp，当前平台={safe_log_text(platform_name or '未知')}，已跳过普通图片回退"
+                )
+                return False
+            await self._send_generated_images_plain(
+                unified_msg_origin,
+                image_paths,
+                info_message=info_message,
+            )
+            return True
+
+        try:
+            await self._send_generated_images_forward(
+                unified_msg_origin,
+                image_paths,
+                info_message=info_message,
+            )
+            return True
+        except Exception as exc:
+            if not allow_plain_fallback:
+                logger.warning(
+                    f"{LOG} 合并转发消息发送失败，已按策略跳过普通图片回退: {safe_log_text(exc, 200)}",
+                    exc_info=True,
+                )
+                return False
+            logger.warning(
+                f"{LOG} 合并转发消息发送失败，已回退普通图片消息: {safe_log_text(exc, 200)}",
+                exc_info=True,
+            )
+            await self._send_generated_images_plain(
+                unified_msg_origin,
+                image_paths,
+                info_message=info_message,
+            )
+            return True
+
+    async def _send_generated_images_plain(
+        self,
+        unified_msg_origin: str,
+        image_paths: list[str],
+        *,
+        info_message: str = "",
     ) -> None:
-        """按配置将生成图片分批发送，避免单条消息图片过多。"""
+        """按普通图片消息分批发送，避免单条消息图片过多。"""
         max_per_message = max(1, self.config_manager.max_images_per_message)
         total = len(image_paths)
         for start in range(0, total, max_per_message):
@@ -899,6 +996,36 @@ class ImageGenerationPlugin(Star):
                 chain.message("\n" + info_message)
 
             await self.context.send_message(unified_msg_origin, chain)
+
+    async def _send_generated_images_forward(
+        self,
+        unified_msg_origin: str,
+        image_paths: list[str],
+        *,
+        info_message: str = "",
+    ) -> None:
+        """按 OneBot v11 合并转发消息发送生成结果。"""
+        nodes = [
+            Node(
+                name="ImageGeneration",
+                uin="0",
+                content=[Image.fromFileSystem(file_path)],
+            )
+            for file_path in image_paths
+        ]
+        if info_message:
+            nodes.append(
+                Node(
+                    name="ImageGeneration",
+                    uin="0",
+                    content=[Plain(info_message)],
+                )
+            )
+
+        await self.context.send_message(
+            unified_msg_origin,
+            MessageChain(chain=[Nodes(nodes)]),
+        )
 
     async def _generate_image_requests_concurrently(
         self,
@@ -1280,6 +1407,7 @@ class ImageGenerationPlugin(Star):
             preset_label=preset_label,
             presets=matched_presets,
             personas=matched_personas,
+            platform_name=event.get_platform_name(),
         )
 
     @filter.command("生图模型")

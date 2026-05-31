@@ -89,6 +89,42 @@ DEFAULT_RATE_LIMIT_SECONDS = 0
 """默认用户请求频率限制（秒），0 表示不限制。"""
 
 
+# ========================== 结果发送方式 ==========================
+
+RESULT_DELIVERY_MODE_PLAIN = "普通图片消息"
+"""按普通图片消息发送生成结果。"""
+
+RESULT_DELIVERY_MODE_FORWARD = "合并转发消息"
+"""按 OneBot v11 合并转发消息发送生成结果。"""
+
+ALL_RESULT_DELIVERY_MODES = (
+    RESULT_DELIVERY_MODE_PLAIN,
+    RESULT_DELIVERY_MODE_FORWARD,
+)
+"""所有可选生成结果发送方式。"""
+
+DEFAULT_RESULT_DELIVERY_MODE = RESULT_DELIVERY_MODE_PLAIN
+"""默认生成结果发送方式。"""
+
+
+# ========================== 图片审核未通过结果处理方式 ==========================
+
+IMAGE_AUDIT_FAILURE_ACTION_BLOCK = "不发送"
+"""图片审核未通过后不发送生成图片。"""
+
+IMAGE_AUDIT_FAILURE_ACTION_FORWARD = "合并转发消息"
+"""图片审核未通过后仅尝试 OneBot v11 合并转发发送。"""
+
+ALL_IMAGE_AUDIT_FAILURE_ACTIONS = (
+    IMAGE_AUDIT_FAILURE_ACTION_BLOCK,
+    IMAGE_AUDIT_FAILURE_ACTION_FORWARD,
+)
+"""所有可选图片审核未通过结果处理方式。"""
+
+DEFAULT_IMAGE_AUDIT_FAILURE_ACTION = IMAGE_AUDIT_FAILURE_ACTION_BLOCK
+"""默认图片审核未通过结果处理方式。"""
+
+
 # ========================== LLM 工具开关 ==========================
 
 LLM_TOOL_IMAGE_GENERATION = "生图工具"

@@ -897,6 +897,16 @@
         },
         "default": 5
       },
+      "result_delivery_mode": {
+        "description": "生成结果发送方式",
+        "hint": "控制 /生图 指令完成后的自动发送方式。合并转发消息仅在 aiocqhttp / OneBot v11 平台尝试发送；其他平台直接使用普通图片消息，发送失败时也会自动回退。LLM 工具结果交付不受此项影响。",
+        "type": "string",
+        "default": "普通图片消息",
+        "options": [
+          "普通图片消息",
+          "合并转发消息"
+        ]
+      },
       "default_aspect_ratio": {
         "description": "默认宽高比",
         "hint": "命令生图时默认使用的宽高比；选择“不指定”时请求中不携带比例字段。",
@@ -1023,12 +1033,12 @@
   },
   "safety_audit": {
     "description": "安全审核",
-    "hint": "配置提示词审核、图片审核和审核白名单。",
+    "hint": "配置提示词审核、图片审核、图片审核未通过处理和审核白名单。",
     "type": "object",
     "items": {
       "umo_whitelist": {
         "description": "审核白名单 UMO",
-        "hint": "填写 unified_msg_origin（UMO）；命中的会话会跳过提示词和图片审核。",
+        "hint": "填写 unified_msg_origin（UMO）；命中的会话会跳过提示词审核和图片审核。",
         "type": "list",
         "default": []
       },
@@ -1083,6 +1093,16 @@
             "hint": "开启后在发送图片前调用对话模型审核图片内容。",
             "type": "bool",
             "default": false
+          },
+          "failure_result_action": {
+            "description": "图片审核未通过处理方式",
+            "hint": "现有图片审核判定未通过后的处理方式。默认不发送图片；选择合并转发消息时，仅在 aiocqhttp / OneBot v11 平台尝试以聊天记录发送生成结果，非 aiocqhttp、LLM 工具交付、公共 API 或合并转发失败时仍按不发送处理。",
+            "type": "string",
+            "default": "不发送",
+            "options": [
+              "不发送",
+              "合并转发消息"
+            ]
           },
           "ai_provider_id": {
             "description": "AI 审核 Provider",

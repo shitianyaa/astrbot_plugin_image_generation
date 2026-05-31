@@ -12,7 +12,9 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 
 from .constants import (
     ALL_LLM_TOOLS,
+    ALL_IMAGE_AUDIT_FAILURE_ACTIONS,
     ALL_RESULT_INFO_ITEMS,
+    ALL_RESULT_DELIVERY_MODES,
     DEFAULT_ASPECT_RATIO,
     DEFAULT_AUDIT_MAX_RETRY_ATTEMPTS,
     DEFAULT_DAILY_LIMIT_COUNT,
@@ -26,14 +28,20 @@ from .constants import (
     DEFAULT_NON_RETRYABLE_ERROR_KEYWORDS,
     DEFAULT_NON_RETRYABLE_STATUS_CODES,
     DEFAULT_PROMPT_AUDIT_PROMPT,
+    DEFAULT_IMAGE_AUDIT_FAILURE_ACTION,
+    DEFAULT_RESULT_DELIVERY_MODE,
     DEFAULT_RESULT_INFO_ITEMS,
     DEFAULT_RATE_LIMIT_SECONDS,
     DEFAULT_RESOLUTION,
     DEFAULT_TIMEOUT,
+    IMAGE_AUDIT_FAILURE_ACTION_BLOCK,
+    IMAGE_AUDIT_FAILURE_ACTION_FORWARD,
     LLM_TOOL_IMAGE_GENERATION,
     LLM_TOOL_PRESET_EDIT,
     LLM_TOOL_PRESET_QUERY,
     LLM_TOOL_TASK_MANAGEMENT,
+    RESULT_DELIVERY_MODE_FORWARD,
+    RESULT_DELIVERY_MODE_PLAIN,
     RESULT_INFO_COUNT,
     RESULT_INFO_DURATION,
     RESULT_INFO_MODEL,
@@ -56,6 +64,10 @@ __all__ = (
     "PersonaTemplate",
     "PluginConfig",
     "PromptAuditSettings",
+    "IMAGE_AUDIT_FAILURE_ACTION_BLOCK",
+    "IMAGE_AUDIT_FAILURE_ACTION_FORWARD",
+    "RESULT_DELIVERY_MODE_FORWARD",
+    "RESULT_DELIVERY_MODE_PLAIN",
     "RESULT_INFO_COUNT",
     "RESULT_INFO_DURATION",
     "RESULT_INFO_MODEL",
@@ -119,6 +131,7 @@ class GenerationSettings:
     result_info_items: set[str] = field(
         default_factory=lambda: set(DEFAULT_RESULT_INFO_ITEMS)
     )
+    result_delivery_mode: str = DEFAULT_RESULT_DELIVERY_MODE
     start_task_message_template: str = "已开始生图任务{reference_images_block}{preset_block}{persona_block}{image_count_block} [任务ID: {task_id}]"
 
 
@@ -150,6 +163,7 @@ class ImageAuditSettings:
     ai_provider_id: str = ""
     max_retry_attempts: int = DEFAULT_AUDIT_MAX_RETRY_ATTEMPTS
     ai_prompt: str = DEFAULT_IMAGE_AUDIT_PROMPT
+    failure_result_action: str = DEFAULT_IMAGE_AUDIT_FAILURE_ACTION
 
 
 @dataclass
@@ -302,12 +316,46 @@ class ConfigManager:
                 list(DEFAULT_NON_RETRYABLE_ERROR_KEYWORDS),
             ),
             result_info_items=self._parse_result_info_items(cfg),
+            result_delivery_mode=self._parse_result_delivery_mode(cfg),
             start_task_message_template=self._get_str(
                 cfg,
                 "start_task_message_template",
                 GenerationSettings.start_task_message_template,
             ),
         )
+
+    def _parse_result_delivery_mode(self, cfg: dict[str, Any]) -> str:
+        """Parse generated result delivery mode with backwards-compatible aliases."""
+        raw = cfg.get("result_delivery_mode")
+        if raw is None:
+            raw = cfg.get("生成结果发送方式")
+        if raw is None and "send_result_as_forward" in cfg:
+            return (
+                RESULT_DELIVERY_MODE_FORWARD
+                if self._get_bool(cfg, "send_result_as_forward", False)
+                else RESULT_DELIVERY_MODE_PLAIN
+            )
+
+        mode = str(raw or DEFAULT_RESULT_DELIVERY_MODE).strip()
+        aliases = {
+            "plain": RESULT_DELIVERY_MODE_PLAIN,
+            "normal": RESULT_DELIVERY_MODE_PLAIN,
+            "image": RESULT_DELIVERY_MODE_PLAIN,
+            "普通图片": RESULT_DELIVERY_MODE_PLAIN,
+            RESULT_DELIVERY_MODE_PLAIN: RESULT_DELIVERY_MODE_PLAIN,
+            "forward": RESULT_DELIVERY_MODE_FORWARD,
+            "forward_message": RESULT_DELIVERY_MODE_FORWARD,
+            "merged_forward": RESULT_DELIVERY_MODE_FORWARD,
+            "合并转发": RESULT_DELIVERY_MODE_FORWARD,
+            RESULT_DELIVERY_MODE_FORWARD: RESULT_DELIVERY_MODE_FORWARD,
+        }
+        normalized = aliases.get(mode) or aliases.get(mode.lower())
+        if normalized in ALL_RESULT_DELIVERY_MODES:
+            return normalized
+        logger.warning(
+            f"{LOG} 生成结果发送方式配置无效: {safe_log_text(mode)}，已使用默认普通图片消息"
+        )
+        return DEFAULT_RESULT_DELIVERY_MODE
 
     def _parse_result_info_items(self, cfg: dict[str, Any]) -> set[str]:
         """Parse selected result information items."""
@@ -355,7 +403,39 @@ class ConfigManager:
                 min_value=1,
             ),
             ai_prompt=self._get_str(cfg, "ai_prompt", ImageAuditSettings.ai_prompt),
+            failure_result_action=self._parse_image_audit_failure_action(cfg),
         )
+
+    def _parse_image_audit_failure_action(self, cfg: dict[str, Any]) -> str:
+        """Parse action used when generated image audit rejects the result."""
+        raw = cfg.get("failure_result_action")
+        if raw is None:
+            raw = cfg.get("audit_failure_result_action")
+        if raw is None:
+            raw = cfg.get("审核未通过处理方式")
+
+        action = str(raw or DEFAULT_IMAGE_AUDIT_FAILURE_ACTION).strip()
+        aliases = {
+            "forward": IMAGE_AUDIT_FAILURE_ACTION_FORWARD,
+            "forward_message": IMAGE_AUDIT_FAILURE_ACTION_FORWARD,
+            "merged_forward": IMAGE_AUDIT_FAILURE_ACTION_FORWARD,
+            "force_forward": IMAGE_AUDIT_FAILURE_ACTION_FORWARD,
+            "合并转发": IMAGE_AUDIT_FAILURE_ACTION_FORWARD,
+            IMAGE_AUDIT_FAILURE_ACTION_FORWARD: IMAGE_AUDIT_FAILURE_ACTION_FORWARD,
+            "block": IMAGE_AUDIT_FAILURE_ACTION_BLOCK,
+            "deny": IMAGE_AUDIT_FAILURE_ACTION_BLOCK,
+            "skip": IMAGE_AUDIT_FAILURE_ACTION_BLOCK,
+            "no_send": IMAGE_AUDIT_FAILURE_ACTION_BLOCK,
+            "不发": IMAGE_AUDIT_FAILURE_ACTION_BLOCK,
+            IMAGE_AUDIT_FAILURE_ACTION_BLOCK: IMAGE_AUDIT_FAILURE_ACTION_BLOCK,
+        }
+        normalized = aliases.get(action) or aliases.get(action.lower())
+        if normalized in ALL_IMAGE_AUDIT_FAILURE_ACTIONS:
+            return normalized
+        logger.warning(
+            f"{LOG} 图片审核未通过处理方式配置无效: {safe_log_text(action)}，已使用默认不发送"
+        )
+        return DEFAULT_IMAGE_AUDIT_FAILURE_ACTION
 
     def reload(self) -> PluginConfig:
         """重新加载配置。"""
@@ -844,6 +924,16 @@ class ConfigManager:
     def result_info_items(self) -> set[str]:
         """生图成功后要展示的结果信息项。"""
         return self._plugin_config.generation_settings.result_info_items
+
+    @property
+    def result_delivery_mode(self) -> str:
+        """生图成功后生成结果的发送方式。"""
+        return self._plugin_config.generation_settings.result_delivery_mode
+
+    @property
+    def send_result_as_forward(self) -> bool:
+        """是否以合并转发消息发送命令生图结果。"""
+        return self.result_delivery_mode == RESULT_DELIVERY_MODE_FORWARD
 
     def should_show_result_info(self, item: str) -> bool:
         """检查指定结果信息项是否启用。"""
